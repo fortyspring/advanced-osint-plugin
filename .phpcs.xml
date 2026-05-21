@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<ruleset name="MQ-OSINT">
+    <description>MQ-OSINT Core 2026 WordPress Coding Standards</description>
+    <file>.</file>
+    <exclude-pattern>vendor/*</exclude-pattern>
+    <exclude-pattern>node_modules/*</exclude-pattern>
+    <config name="php_version" value="80000"/>
+    <rule ref="WordPress-Core"/>
+    <rule ref="Generic.Arrays.DisallowLongArraySyntax.Found">
+        <severity>0</severity>
+    </rule>
+    <config name="minimum_supported_wp_version" value="6.0"/>
+    <rule ref="WordPress.WP.I18n">
+        <properties>
+            <property name="text_domain" type="array" value="mq-osint-core-2026"/>
+        </properties>
+    </rule>
+</ruleset>
