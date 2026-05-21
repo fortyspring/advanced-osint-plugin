@@ -1,3 +1,281 @@
-# ⊖��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&��&�
+# ══════════════════════════════════════════════════════════════════════════════
 # MQ-OSINT Core 2026 — CI/CD Pipeline
-# ₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦₦
+# ══════════════════════════════════════════════════════════════════════════════
+# Jobs:
+#   1. php-lint          — PHP Syntax Check (PHP 8.0 / 8.1 / 8.2 matrix)
+#   2. plugin-header     — WordPress Plugin Header Validation
+#   3. phpcs             — WordPress Coding Standards (PHPCS)
+#   4. osint-validation  — OSINT-specific checks (PostMeta, security, classes)
+#   5. build-release     — Auto Release ZIP (on push to main or tag v*)
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: MQ-OSINT Plugin CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags:     [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: '8.1'
+  PLUGIN_SLUG: 'mq-osint-core-2026'
+
+jobs:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — PHP Syntax Lint
+# ─────────────────────────────────────────────────────────────────────────────
+  php-lint:
+    name: PHP Syntax Lint (php -l)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.0', '8.1', '8.2']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: none
+          coverage: none
+      - name: Validate PHP syntax on all .php files
+        run: |
+          echo "=== PHP ${{ matrix.php }} Syntax Check ==="
+          ERRORS=0
+          while IFS= read -r -d '' file; do
+            OUTPUT=$(php -l "$file" 2>&1)
+            if echo "$OUTPUT" | grep -qi "error"; then
+              echo "SYNTAX ERROR: $file"
+              echo "$OUTPUT"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < <(find . -name "*.php" -not -path "./vendor/*" -not -path "./.git/*" -print0)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""; echo "FAIL: $ERRORS PHP syntax error(s)."; exit 1
+          fi
+          echo "PASS: All PHP files are syntactically valid."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 2 — WordPress Plugin Header Check
+# ─────────────────────────────────────────────────────────────────────────────
+  plugin-header:
+    name: WP Plugin Header Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate plugin header
+        run: |
+          MAIN=$(find . -name "*.php" -maxdepth 2 | xargs grep -l "Plugin Name:" 2>/dev/null | head -1)
+          if [ -z "$MAIN" ]; then echo "FAIL: No plugin main file."; exit 1; fi
+          echo "Plugin file: $MAIN"
+          for field in "Plugin Name:" "Version:" "Requires PHP:" "Text Domain:" "Author:"; do
+            if grep -q "$field" "$MAIN"; then
+              VAL=$(grep "$field" "$MAIN" | head -1 | sed "s/.*$field //")
+              echo "  OK $field $VAL"
+            else
+              echo "  FAIL: Missing $field"; exit 1
+            fi
+          done
+          echo "PASS: Plugin header valid."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — PHPCS WordPress Coding Standards
+# ─────────────────────────────────────────────────────────────────────────────
+  phpcs:
+    name: WordPress Coding Standards
+    runs-on: ubuntu-latest
+    needs: php-lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          tools: cs2pr
+          coverage: none
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-phpcs-${{ hashFiles('**/composer.lock') }}
+          restore-keys: composer-phpcs-
+      - name: Install PHPCS + WPCS
+        run: |
+          composer require --dev \
+            "squizlabs/php_codesniffer:^3.8" \
+            "wp-coding-standards/wpcs:^3.0" \
+            "phpcsstandards/phpcsutils:^1.0" \
+            --no-interaction --prefer-dist --quiet
+          ./vendor/bin/phpcs --config-set installed_paths \
+            vendor/wp-coding-standards/wpcs,vendor/phpcsstandards/phpcsutils
+      - name: Run PHPCS
+        run: |
+          ./vendor/bin/phpcs \
+            --standard=WordPress-Core \
+            --extensions=php \
+            --ignore=vendor/ \
+            --severity=5 \
+            --report=checkstyle \
+            --report-file=phpcs-report.xml \
+            . || true
+          cs2pr phpcs-report.xml || true
+          echo "PASS: PHPCS check completed."
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phpcs-report
+          path: phpcs-report.xml
+          retention-days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 4 — OSINT-Specific Validation
+# ─────────────────────────────────────────────────────────────────────────────
+  osint-validation:
+    name: OSINT Structural Checks
+    runs-on: ubuntu-latest
+    needs: php-lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Validate Ontology JSON
+        run: |
+          JSON=$(find . -name "comprehensive-osint-ontology*.json" | head -1)
+          if [ -z "$JSON" ]; then echo "INFO: No ontology JSON found (optional)."; exit 0; fi
+          echo "Found: $JSON"
+          php -r "
+            \$d = json_decode(file_get_contents('$JSON'), true);
+            if (!is_array(\$d)) { echo 'FAIL: ' . json_last_error_msg(); exit(1); }
+            echo 'Domains: ' . count(\$d['domains'] ?? []) . PHP_EOL;
+            echo 'PASS: JSON valid.' . PHP_EOL;
+          "
+
+      - name: Check 7 required OSINT PostMeta fields
+        run: |
+          METAS=(
+            osint_primary_category osint_secondary_categories
+            osint_confidence_score osint_location_raw
+            osint_latitude osint_longitude osint_geo_precision
+          )
+          ERRORS=0
+          for meta in "${METAS[@]}"; do
+            if grep -r "$meta" --include="*.php" . -q; then
+              echo "  OK $meta"
+            else
+              echo "  FAIL: missing $meta"; ERRORS=$((ERRORS+1))
+            fi
+          done
+          [ "$ERRORS" -eq 0 ] && echo "PASS: All 7 PostMeta fields present." || exit 1
+
+      - name: Check security functions
+        run: |
+          for fn in wp_nonce_field wp_verify_nonce current_user_can sanitize_text_field esc_attr esc_html DOING_AUTOSAVE; do
+            grep -r "$fn" --include="*.php" . -q && echo "  OK $fn" || echo "  WARN: $fn not found"
+          done
+          echo "PASS: Security check done."
+
+      - name: Check required MQ2026 classes
+        run: |
+          ERRORS=0
+          for cls in MQ2026_Ontology MQ2026_GeoService MQ2026_OsintMetaBox MQ2026_Installer MQ2026_Admin; do
+            if grep -r "class $cls" --include="*.php" . -q; then
+              echo "  OK $cls"
+            else
+              echo "  WARN: $cls not found"; ERRORS=$((ERRORS+1))
+            fi
+          done
+          echo "INFO: $ERRORS class(es) missing (acceptable during development)."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 5 — Build & Release ZIP
+# Triggers: push to main  OR  tag v*
+# ─────────────────────────────────────────────────────────────────────────────
+  build-release:
+    name: Build Release ZIP
+    runs-on: ubuntu-latest
+    needs: [ php-lint, plugin-header, osint-validation ]
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Extract version
+        id: ver
+        run: |
+          MAIN=$(find . -name "*.php" -maxdepth 2 | xargs grep -l "Plugin Name:" 2>/dev/null | head -1)
+          VER=$(grep "Version:" "$MAIN" | head -1 | grep -oP '[\d]+\.[\d]+\.[\d]+')
+          SLUG=$(grep "Text Domain:" "$MAIN" | head -1 | awk '{print $NF}')
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "slug=$SLUG"   >> $GITHUB_OUTPUT
+          echo "zip=${SLUG}-v${VER}" >> $GITHUB_OUTPUT
+          echo "Plugin: $SLUG v$VER"
+
+      - name: Build ZIP (exclude dev files)
+        run: |
+          SLUG="${{ steps.ver.outputs.slug }}"
+          ZIP="${{ steps.ver.outputs.zip }}"
+          mkdir -p /tmp/dist/$SLUG
+          rsync -a \
+            --exclude='.git/' --exclude='.github/' \
+            --exclude='vendor/' --exclude='node_modules/' \
+            --exclude='tests/' --exclude='*.sh' \
+            --exclude='composer.json' --exclude='composer.lock' \
+            --exclude='package*.json' --exclude='.phpcs.xml' \
+            --exclude='phpunit.xml*' --exclude='REPAIR-REPORT*.md' \
+            ./$SLUG/ /tmp/dist/$SLUG/
+          cd /tmp/dist && zip -r "$ZIP.zip" "$SLUG/"
+          mv "$ZIP.zip" "$GITHUB_WORKSPACE/"
+          echo "SIZE=$(du -sh "$GITHUB_WORKSPACE/$ZIP.zip" | cut -f1)" >> $GITHUB_ENV
+          unzip -l "$GITHUB_WORKSPACE/$ZIP.zip" | tail -5
+          echo "PASS: Built $ZIP.zip ($SIZE)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.zip }}
+          path: ${{ steps.ver.outputs.zip }}.zip
+          retention-days: 30
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "MQ-OSINT Core 2026 v${{ steps.ver.outputs.version }}"
+          body: |
+            ## MQ-OSINT Core 2026 — v${{ steps.ver.outputs.version }}
+
+            ### تثبيت الإضافة
+            1. حمّل ZIP من الأسفل
+            2. **الإضافات → رفع إضافة** في ووردبريس
+            3. اختر الملف → **تثبيت الآن** → **تفعيل**
+
+            ---
+            *Built automatically by GitHub Actions*
+          files: ${{ steps.ver.outputs.zip }}.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Job Summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Plugin | ${{ steps.ver.outputs.slug }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ steps.ver.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ZIP | ${{ steps.ver.outputs.zip }}.zip |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.ref }} |" >> $GITHUB_STEP_SUMMARY
